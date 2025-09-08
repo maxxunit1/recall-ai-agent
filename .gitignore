@@ -1,0 +1,63 @@
+# API ключи и секреты (КРИТИЧЕСКИ ВАЖНО!)
+.env
+*.env
+.env.local
+.env.production
+
+# Логи
+*.log
+logs/
+recall_agent.log
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+MANIFEST
+
+# Virtual Environment
+.venv/
+venv/
+ENV/
+env/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+
+# macOS
+.DS_Store
+
+# Windows
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+
+# Temporary files
+*.tmp
+*.temp
+.cache/
+
+# Legacy files (local development only)
+recall_trading_agent.py
+recall_trading_agent_v1_working.py
