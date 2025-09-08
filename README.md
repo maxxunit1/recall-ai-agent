@@ -12,10 +12,6 @@ Enterprise-grade modular trading bot for Recall Network AI agent competitions.
 - `executor.py` - Trade execution engine with performance tracking
 - `utils.py` - Structured logging and utilities
 
-**Legacy versions:**
-- `recall_trading_agent.py` - Single-file implementation
-- `recall_trading_agent_v1_working.py` - Backup version
-
 ## Quick Start
 
 ### Requirements
