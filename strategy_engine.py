@@ -142,158 +142,125 @@ class BaseStrategy(ABC):
                         max_allowed=self.config.trading.max_position_size
                     )
                     return False
-            except (ValueError, ZeroDivisionError) as e:
-                self.logger.error("Position size validation failed", error=e)
+            except (ValueError, TypeError):
+                self.logger.error("Signal rejected: Invalid amount format")
                 return False
 
         return True
 
-    def update_metrics(self, signal: TradingSignal, success: bool, actual_return: float = 0.0):
+    def update_performance(self, signal: TradingSignal, success: bool, actual_return: Optional[float] = None):
         """Update strategy performance metrics"""
         self.strategy_metrics["total_trades"] += 1
+
         if success:
             self.strategy_metrics["successful_trades"] += 1
+            if actual_return:
+                self.strategy_metrics["total_return"] += actual_return
 
-        self.strategy_metrics["total_return"] += actual_return
+        # Update win rate
         self.strategy_metrics["win_rate"] = (
                 self.strategy_metrics["successful_trades"] / self.strategy_metrics["total_trades"]
         )
 
-        self.position_history.append(signal)
-
-        self.logger.info(
-            "Strategy metrics updated",
-            strategy=self.get_strategy_name(),
-            total_trades=self.strategy_metrics["total_trades"],
-            win_rate=self.strategy_metrics["win_rate"],
-            total_return=self.strategy_metrics["total_return"]
-        )
+        # Update last signal time
+        self.last_signal_time = signal.timestamp
 
 
 class SimpleThresholdStrategy(BaseStrategy):
     """
     Simple threshold-based trading strategy
 
-    Implements basic buy/sell logic based on price thresholds
-    with risk management and position sizing.
+    Based on Trading Guide examples: buys low, sells high with fixed thresholds
     """
 
     def __init__(self, config: Config, data_handler: DataHandler):
         super().__init__(config, data_handler)
 
-        # Strategy parameters
-        self.buy_threshold = 95000.0  # USDC price threshold for buying
-        self.sell_threshold = 105000.0  # USDC price threshold for selling
-        self.confidence_base = 0.7  # Base confidence level
+        # Strategy parameters - USDC typically trades around 1.0
+        self.buy_threshold = 0.9990  # Buy WETH when USDC cheap (below 0.9990)
+        self.sell_threshold = 1.0010  # Sell WETH when USDC expensive (above 1.0010)
 
-        self.logger.info(
-            "SimpleThresholdStrategy configured",
-            buy_threshold=self.buy_threshold,
-            sell_threshold=self.sell_threshold
-        )
+        self.logger.info("SimpleThresholdStrategy configured",
+                         buy_threshold=self.buy_threshold,
+                         sell_threshold=self.sell_threshold)
 
     def get_strategy_name(self) -> str:
         return "SimpleThreshold"
 
     def analyze_market(self, market_data: MarketData) -> TradingSignal:
         """
-        Analyze market using simple threshold logic
+        Analyze market and generate threshold-based signal
 
-        Args:
-            market_data: Current market data
-
-        Returns:
-            TradingSignal: Generated trading signal
+        Logic:
+        - If USDC price < buy_threshold -> BUY WETH with USDC
+        - If USDC price > sell_threshold -> SELL WETH for USDC
+        - Otherwise -> HOLD
         """
-        operation_id = f"analyze_market_{int(time.time())}"
-        self.performance_tracker.start_operation(operation_id)
+        # Get USDC price for decision making
+        usdc_price = None
+        for token_addr, price_data in market_data.token_prices.items():
+            if token_addr == self.config.tokens.usdc_address or "usdc" in token_addr.lower():
+                usdc_price = price_data.price if hasattr(price_data, 'price') else price_data
+                break
 
-        try:
-            # Get USDC and WETH prices
-            usdc_address = self.config.tokens.usdc_address
-            weth_address = self.config.tokens.weth_address
+        if usdc_price is None:
+            return self._create_hold_signal("No USDC price available")
 
-            current_price = None
-            if usdc_address in market_data.token_prices:
-                current_price = market_data.token_prices[usdc_address].price
-            elif weth_address in market_data.token_prices:
-                # Use WETH price for demonstration
-                current_price = market_data.token_prices[weth_address].price
+        current_price = float(usdc_price)  # Use actual USDC price (around 1.0)
 
-            if current_price is None:
-                self.logger.warning("No price data available for analysis")
-                return self._create_hold_signal("No price data available")
+        # Calculate confidence based on distance from threshold
+        if current_price < self.buy_threshold:
+            # BUY signal
+            price_deviation = (self.buy_threshold - current_price) / self.buy_threshold
+            confidence = min(0.9, 0.6 + price_deviation * 2)  # 60-90% confidence
 
-            # Simple threshold logic
-            if current_price < self.buy_threshold:
-                return self._create_buy_signal(current_price, market_data)
-            elif current_price > self.sell_threshold:
-                return self._create_sell_signal(current_price, market_data)
-            else:
-                return self._create_hold_signal(f"Price {current_price} within threshold range")
+            amount = self.config.trading.default_amount
 
-        finally:
-            self.performance_tracker.end_operation(operation_id, success=True)
-
-    def _create_buy_signal(self, current_price: float, market_data: MarketData) -> TradingSignal:
-        """Create buy trading signal"""
-        price_deviation = (self.buy_threshold - current_price) / self.buy_threshold
-        confidence = min(self.confidence_base + price_deviation, 1.0)
-
-        # Calculate position size based on portfolio
-        amount = self.config.trading.default_amount
-        if market_data.portfolio:
-            # Use percentage of portfolio value
-            portfolio_value = market_data.portfolio.total_value
-            max_position_value = portfolio_value * self.config.trading.max_position_size
-            amount = str(min(float(amount), max_position_value))
-
-        return TradingSignal(
-            action=TradingAction.BUY,
-            from_token=self.config.tokens.usdc_address,
-            to_token=self.config.tokens.weth_address,
-            amount=amount,
-            confidence=confidence,
-            risk_level=self._assess_risk(confidence),
-            reasoning=f"Price {current_price} below buy threshold {self.buy_threshold}",
-            timestamp=time.time(),
-            strategy_name=self.get_strategy_name(),
-            expected_return=price_deviation * 100,  # Expected % return
-            stop_loss=current_price * (1 - self.config.trading.stop_loss_threshold),
-            take_profit=current_price * (1 + self.config.trading.take_profit_threshold)
-        )
-
-    def _create_sell_signal(self, current_price: float, market_data: MarketData) -> TradingSignal:
-        """Create sell trading signal"""
-        price_deviation = (current_price - self.sell_threshold) / self.sell_threshold
-        confidence = min(self.confidence_base + price_deviation, 1.0)
-
-        # Calculate sell amount based on current holdings
-        amount = self.config.trading.default_amount
-        if market_data.portfolio:
-            # Find WETH holdings
-            weth_holdings = next(
-                (token for token in market_data.portfolio.tokens
-                 if token.get("token") == self.config.tokens.weth_address),
-                None
+            return TradingSignal(
+                action=TradingAction.BUY,
+                from_token=self.config.tokens.usdc_address,
+                to_token=self.config.tokens.weth_address,
+                amount=amount,
+                confidence=confidence,
+                risk_level=self._assess_risk(confidence),
+                reasoning=f"Price {current_price} below buy threshold {self.buy_threshold}",
+                timestamp=time.time(),
+                strategy_name=self.get_strategy_name(),
+                expected_return=price_deviation * 100
             )
-            if weth_holdings:
-                # Sell portion of holdings
-                max_sell = weth_holdings.get("amount", 0) * 0.5  # Sell up to 50%
-                amount = str(min(float(amount), max_sell))
 
-        return TradingSignal(
-            action=TradingAction.SELL,
-            from_token=self.config.tokens.weth_address,
-            to_token=self.config.tokens.usdc_address,
-            amount=amount,
-            confidence=confidence,
-            risk_level=self._assess_risk(confidence),
-            reasoning=f"Price {current_price} above sell threshold {self.sell_threshold}",
-            timestamp=time.time(),
-            strategy_name=self.get_strategy_name(),
-            expected_return=price_deviation * 100
-        )
+        elif current_price > self.sell_threshold:
+            # SELL signal
+            price_deviation = (current_price - self.sell_threshold) / self.sell_threshold
+            confidence = min(0.9, 0.6 + price_deviation * 2)
+
+            # Calculate amount to sell (need to check WETH balance)
+            amount = self.config.trading.default_amount
+            if market_data.portfolio and market_data.portfolio.tokens:
+                for token in market_data.portfolio.tokens:
+                    if token.get("symbol") == "WETH" or token.get("token") == self.config.tokens.weth_address:
+                        # Use available WETH balance (with some buffer)
+                        available = float(token.get("amount", 0))
+                        amount = str(min(float(self.config.trading.default_amount), available * 0.8))
+                        break
+
+            return TradingSignal(
+                action=TradingAction.SELL,
+                from_token=self.config.tokens.weth_address,
+                to_token=self.config.tokens.usdc_address,
+                amount=amount,
+                confidence=confidence,
+                risk_level=self._assess_risk(confidence),
+                reasoning=f"Price {current_price} above sell threshold {self.sell_threshold}",
+                timestamp=time.time(),
+                strategy_name=self.get_strategy_name(),
+                expected_return=price_deviation * 100
+            )
+        else:
+            # HOLD signal
+            return self._create_hold_signal(
+                f"Price {current_price} between thresholds {self.buy_threshold}-{self.sell_threshold}"
+            )
 
     def _create_hold_signal(self, reasoning: str) -> TradingSignal:
         """Create hold trading signal"""
@@ -319,6 +286,232 @@ class SimpleThresholdStrategy(BaseStrategy):
             return RiskLevel.HIGH
         else:
             return RiskLevel.CRITICAL
+
+
+class PortfolioManager:
+    """
+    Portfolio Manager based on official Portfolio Manager Tutorial
+
+    Uses CoinGecko for prices and simple balance format from /api/balance
+    """
+
+    def __init__(self, config: Config):
+        self.config = config
+        self.logger = Logger.get_logger("PortfolioManager")
+
+        # Token configuration (exactly from tutorial)
+        self.TOKEN_MAP = {
+            "USDC": "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48",
+            "WETH": "0xC02aaA39b223FE8D0A0e5C4F27eAD9083C756Cc2",
+            "WBTC": "0x2260FAC5E5542a773Aa44fBCfeDf7C193bc2C599"
+        }
+
+        self.DECIMALS = {
+            "USDC": 6,
+            "WETH": 18,
+            "WBTC": 8
+        }
+
+        self.COINGECKO_IDS = {
+            "USDC": "usd-coin",
+            "WETH": "weth",
+            "WBTC": "wrapped-bitcoin"
+        }
+
+        # Portfolio targets (from portfolio_config.json in tutorial)
+        self.targets = {
+            "USDC": 0.60,  # 60%
+            "WETH": 0.30,  # 30%
+            "WBTC": 0.10  # 10%
+        }
+
+        self.DRIFT_THRESHOLD = 0.02  # 2% as in tutorial
+
+        self.logger.info("PortfolioManager initialized (tutorial mode)",
+                         targets=self.targets,
+                         drift_threshold=self.DRIFT_THRESHOLD)
+
+    def fetch_prices(self, symbols: list[str]) -> dict[str, float]:
+        """Fetch prices from CoinGecko (exactly from tutorial)"""
+        import requests
+
+        ids = ",".join(self.COINGECKO_IDS[sym] for sym in symbols if sym in self.COINGECKO_IDS)
+        if not ids:
+            self.logger.error("No valid CoinGecko IDs found", symbols=symbols)
+            return {}
+
+        try:
+            r = requests.get(
+                "https://api.coingecko.com/api/v3/simple/price",
+                params={"ids": ids, "vs_currencies": "usd"},
+                timeout=10,
+            )
+            r.raise_for_status()
+            data = r.json()
+
+            result = {}
+            for sym in symbols:
+                if sym in self.COINGECKO_IDS:
+                    cg_id = self.COINGECKO_IDS[sym]
+                    if cg_id in data:
+                        result[sym] = data[cg_id]["usd"]
+
+            self.logger.info("CoinGecko prices fetched", prices=result)
+            return result
+
+        except Exception as e:
+            self.logger.error("Failed to fetch CoinGecko prices", error=e)
+            return {}
+
+    def fetch_holdings(self) -> dict[str, float]:
+        """Fetch holdings from Recall /api/balance (tutorial format)"""
+        try:
+            # Fix: create DataHandler instance instead of using config.data_handler
+            from data_handler import DataHandler
+            data_handler = DataHandler(self.config)
+            success, balances_list = data_handler.get_balances()
+            if not success or not balances_list:
+                self.logger.error("Failed to fetch holdings")
+                return {}
+
+            # Convert list format to simple dict format
+            balances = {}
+            for item in balances_list:
+                symbol = item.get("symbol", "UNKNOWN")
+                amount = float(item.get("amount", 0))
+                balances[symbol] = amount
+            if not success or not balances:
+                self.logger.error("Failed to fetch holdings")
+                return {}
+
+            # Filter to our supported tokens
+            holdings = {}
+            for symbol in self.targets.keys():
+                holdings[symbol] = balances.get(symbol, 0.0)
+
+            self.logger.info("Holdings fetched", holdings=holdings)
+            return holdings
+
+        except Exception as e:
+            self.logger.error("Failed to fetch holdings", error=e)
+            return {}
+
+    def compute_orders(self, targets: dict, prices: dict, holdings: dict) -> list[dict]:
+        """Compute rebalancing orders (exactly from tutorial)"""
+        total_value = sum(holdings.get(s, 0) * prices.get(s, 0) for s in targets)
+
+        if total_value == 0:
+            raise ValueError("No balances found; fund your sandbox wallet first.")
+
+        overweight, underweight = [], []
+        for sym, weight in targets.items():
+            current_val = holdings.get(sym, 0) * prices.get(sym, 0)
+            target_val = total_value * weight
+            drift_pct = (current_val - target_val) / total_value
+
+            if abs(drift_pct) >= self.DRIFT_THRESHOLD:
+                delta_val = abs(target_val - current_val)
+                token_amt = delta_val / prices.get(sym, 0)
+                side = "sell" if drift_pct > 0 else "buy"
+
+                self.logger.info(f"Rebalance needed: {sym} {side} {token_amt:.6f}")
+
+                # Convert Portfolio Manager format to Trading Guide format
+                # Special handling for USDC: when selling USDC, we buy other tokens
+                if sym == "USDC":
+                    # USDC sell = buy other tokens, skip this - we'll handle in the buying phase
+                    if side == "sell":
+                        continue
+                    from_token = self.TOKEN_MAP["USDC"]
+                    to_token = self.TOKEN_MAP[sym]
+                else:
+                    # Non-USDC tokens: sell to USDC or buy with USDC
+                    from_token, to_token = (
+                        (self.TOKEN_MAP[sym], self.TOKEN_MAP["USDC"]) if side == "sell"
+                        else (self.TOKEN_MAP["USDC"], self.TOKEN_MAP[sym])
+                    )
+
+                (overweight if side == "sell" else underweight).append({
+                    "from_token": from_token,
+                    "to_token": to_token,
+                    "amount": str(token_amt),
+                    "reasoning": f"Rebalance {sym}: target allocation drift {abs(drift_pct) * 100:.1f}%"
+                })
+
+        # Execute sells first so we have USDC to fund buys
+        self.logger.info("Rebalance orders computed", orders_count=len(overweight + underweight))
+        return overweight + underweight
+
+    def plan_rebalance(self, portfolio=None) -> list[dict]:
+        """Main rebalancing function (tutorial interface)"""
+        try:
+            # 1. Fetch current prices from CoinGecko
+            symbols = list(self.targets.keys())
+            prices = self.fetch_prices(symbols)
+            if not prices:
+                self.logger.error("No prices available for rebalancing")
+                return []
+
+            # 2. Fetch current holdings
+            holdings = self.fetch_holdings()
+            if not holdings:
+                self.logger.error("No holdings available for rebalancing")
+                return []
+
+            # 3. Compute orders
+            orders = self.compute_orders(self.targets, prices, holdings)
+
+            self.logger.info("Rebalance plan created (tutorial mode)",
+                             orders_count=len(orders),
+                             total_value=sum(holdings.get(s, 0) * prices.get(s, 0) for s in symbols))
+
+            return orders
+
+        except Exception as e:
+            self.logger.error("Failed to plan rebalance", error=e)
+            return []
+
+    def analyze_portfolio(self, portfolio=None) -> dict:
+        """Analyze portfolio (simplified for tutorial compatibility)"""
+        try:
+            symbols = list(self.targets.keys())
+            prices = self.fetch_prices(symbols)
+            holdings = self.fetch_holdings()
+
+            if not prices or not holdings:
+                return {"error": "No data available"}
+
+            total_value = sum(holdings.get(s, 0) * prices.get(s, 0) for s in symbols)
+
+            current_allocations = {}
+            deviations = {}
+            max_deviation = 0.0
+
+            for symbol in symbols:
+                current_val = holdings.get(symbol, 0) * prices.get(symbol, 0)
+                current_pct = current_val / total_value if total_value > 0 else 0
+                target_pct = self.targets[symbol]
+                deviation = current_pct - target_pct
+
+                current_allocations[symbol] = current_pct
+                deviations[symbol] = deviation
+                max_deviation = max(max_deviation, abs(deviation))
+
+            needs_rebalancing = max_deviation > self.DRIFT_THRESHOLD
+
+            return {
+                "total_value": total_value,
+                "current_allocations": current_allocations,
+                "target_allocations": self.targets,
+                "deviations": deviations,
+                "max_deviation": max_deviation,
+                "needs_rebalancing": needs_rebalancing,
+                "rebalance_threshold": self.DRIFT_THRESHOLD
+            }
+
+        except Exception as e:
+            self.logger.error("Portfolio analysis failed", error=e)
+            return {"error": str(e)}
 
 
 class StrategyEngine:
@@ -361,12 +554,19 @@ class StrategyEngine:
                 self.logger.warning("Failed to get portfolio data")
                 portfolio = None
 
-            # Get token prices
+            # Get token prices for major tokens
             token_prices = {}
-            for token_address in [self.config.tokens.usdc_address, self.config.tokens.weth_address]:
+            token_addresses = [self.config.tokens.usdc_address, self.config.tokens.weth_address]
+
+            for token_address in token_addresses:
                 price_success, price_data = self.data_handler.get_token_price(token_address)
                 if price_success and price_data:
-                    token_prices[token_address] = price_data
+                    token_prices[token_address] = TokenPrice(
+                        address=token_address,
+                        price=price_data,
+                        chain="evm",
+                        specific_chain="eth"
+                    )
 
             if not token_prices:
                 self.logger.error("Failed to get any token prices")
@@ -437,3 +637,12 @@ class StrategyEngine:
             strategy.get_strategy_name(): strategy.strategy_metrics
             for strategy in self.strategies
         }
+
+    def add_strategy(self, strategy: BaseStrategy) -> None:
+        """Add new strategy to engine"""
+        self.strategies.append(strategy)
+        self.logger.info("Strategy added", strategy_name=strategy.get_strategy_name())
+
+    def get_available_strategies(self) -> List[str]:
+        """Get list of available strategy names"""
+        return [strategy.get_strategy_name() for strategy in self.strategies]

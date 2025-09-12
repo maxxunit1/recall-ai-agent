@@ -28,7 +28,7 @@ class ApiConfig:
 @dataclass(frozen=True)
 class TradingConfig:
     """Trading strategy configuration"""
-    default_amount: str = "100"
+    default_amount: str = "1000"
     max_position_size: float = 0.25  # 25% of portfolio
     stop_loss_threshold: float = 0.05  # 5% stop loss
     take_profit_threshold: float = 0.10  # 10% take profit
@@ -133,3 +133,13 @@ class Config:
                 "max_retries": self.api.max_retries
             }
         }
+# === Portfolio Manager settings (Recall Portfolio Tutorial compatible) ===
+# Целевые доли портфеля по символам (сумма ≈ 1.0). Можно править под себя.
+PORTFOLIO_TARGETS = {
+    "USDC": 0.70,   # кэш-буфер
+    "USDbC": 0.10,  # второй стейбл (пример)
+    "WETH": 0.20,   # риск-ассет
+}
+
+# Допустимое отклонение долей (напр., 2%); если больше — запускаем ребаланс.
+PORTFOLIO_DRIFT_THRESHOLD = 0.02
