@@ -102,7 +102,7 @@ class DataHandler:
         try:
             # Prepare request arguments
             request_kwargs = {
-                "timeout": self.config.api.timeout,
+                "timeout": 30,  # 30 seconds timeout
                 "headers": self.session.headers
             }
 
@@ -120,13 +120,18 @@ class DataHandler:
                 try:
                     response_data = response.json() if response.content else {}
 
-                    # Handle successful responses
+                    # Handle all valid API responses (both success=true and success=false)
                     if validate_api_response(response_data):
+                        # Check if API response indicates success or failure
+                        api_success = response_data.get("success", True)
+
                         self.logger.info("API request successful",
-                                       operation_id=operation_id,
-                                       status_code=response.status_code)
+                                         operation_id=operation_id,
+                                         status_code=response.status_code,
+                                         api_success=api_success)
+
                         return ApiResponse(
-                            success=True,
+                            success=api_success,  # Use API's success field
                             data=response_data,
                             status_code=response.status_code,
                             response_time=duration
@@ -134,8 +139,8 @@ class DataHandler:
                     else:
                         # Response format validation failed
                         self.logger.error("Invalid API response format",
-                                        operation_id=operation_id,
-                                        response_data=sanitize_for_logging(response_data))
+                                          operation_id=operation_id,
+                                          response_data=sanitize_for_logging(response_data))
                         return ApiResponse(
                             success=False,
                             error="Invalid response format",
@@ -300,7 +305,7 @@ class DataHandler:
         Universal portfolio reading with multiple fallbacks
 
         Based on Trading Guide: tries multiple endpoints:
-        1) /api/agent/portfolio (Trading guide)
+        1) /api/agent/balances (Trading guide)
         2) /api/agent/balances (API Reference)
         3) /api/balance (Portfolio Manager tutorial)
         """
@@ -422,7 +427,16 @@ class DataHandler:
             params = {"token": token_address, "chain": chain, "specificChain": specific_chain}
 
         resp = self._make_request("GET", "/api/price", params=params, operation_id=op_id)
-        if not resp.success or resp.data is None:
+        if resp.data is None:
+            return False, None
+
+        # Handle API responses that indicate failure
+        if hasattr(resp, 'data') and isinstance(resp.data, dict) and resp.data.get("success") == False:
+            # API returned {"success": false} - this is a valid response indicating no price data
+            self.logger.info(f"Price API returned success=false for token, treating as no data available")
+            return False, None
+
+        if not resp.success:
             return False, None
 
         data = resp.data

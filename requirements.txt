@@ -1,2 +1,38 @@
+# Recall AI Trading Agent - Dependencies
+# Enterprise Python trading bot with Claude AI integration
+
+# Core dependencies
 requests>=2.31.0
 python-dotenv>=1.0.0
+numpy>=1.24.0
+
+# Claude AI integration
+anthropic>=0.28.0
+
+# OpenAI fallback (optional)
+openai>=1.30.0
+
+# Data processing
+pandas>=2.0.0
+
+# Scheduling and automation
+schedule>=1.2.0
+
+# HTTP and retry logic
+requests-toolbelt>=1.0.0
+urllib3>=2.0.0
+
+# Logging and monitoring
+structlog>=23.1.0
+
+# Development and testing (optional)
+pytest>=7.0.0
+pytest-asyncio>=0.21.0
+black>=23.0.0
+flake8>=6.0.0
+
+# Security
+cryptography>=41.0.0
+
+# Performance optimization
+cachetools>=5.3.0

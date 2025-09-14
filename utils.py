@@ -194,14 +194,12 @@ def validate_api_response(response_data: Dict[str, Any]) -> bool:
     if "status" in response_data and response_data["status"] == "ok":
         return True
 
-    # Handle trading endpoint format
+    # Handle trading endpoint format - success field is required
     if "success" not in response_data:
         return False
 
-    # If success is False, should have error information
-    if not response_data["success"] and "error" not in response_data:
-        return False
-
+    # Both success=true and success=false are valid responses
+    # success=false with error info is a valid API response
     return True
 
 

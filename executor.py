@@ -132,6 +132,32 @@ class TradeExecutor:
                 self._update_metrics(result)
                 return result
 
+            # 🚀 ИСПРАВЛЕННЫЙ DYNAMIC POSITION SIZING
+            try:
+                portfolio_success, portfolio = self.data_handler.get_portfolio()
+                if portfolio_success and portfolio and hasattr(portfolio, 'tokens'):
+                    # Считаем USDC баланс вручную из tokens
+                    usdc_balance = 0
+                    for token in portfolio.tokens:
+                        if token.get("symbol") == "USDC":
+                            usdc_balance = float(token.get("amount", 0))
+                            break
+
+                    if usdc_balance > 0:
+                        # Для verification trade используем фиксированную сумму
+                        amount = str(min(50.0, usdc_balance * 0.1))  # $50 или 10% USDC
+                        self.logger.info(f"Portfolio sizing: ${amount} USDC (available: ${usdc_balance:.2f})")
+                    else:
+                        self.logger.warning("No USDC balance found, using minimum")
+                        amount = "10"  # Минимальная сумма
+                else:
+                    self.logger.warning("Portfolio data unavailable, using minimum")
+                    amount = "10"  # Минимальная сумма
+
+            except Exception as e:
+                self.logger.warning(f"Failed to calculate portfolio amount: {e}")
+                amount = "10"  # Минимальная сумма
+
             self.logger.info("Executing trade via API",
                              from_token=from_token,
                              to_token=to_token,
@@ -188,8 +214,9 @@ class TradeExecutor:
 
     def _make_trade_request(self, trade_data: Dict[str, Any], operation_id: str) -> ApiResponse:
         """
-        Make direct trade request to Recall API
+        ✅ УЛУЧШЕННЫЙ метод с детальным логированием ошибок
 
+        Make direct trade request to Recall API
         Based on API Reference: POST /api/trade/execute
         Must send JSON directly without data wrapper
         """
@@ -202,26 +229,78 @@ class TradeExecutor:
             "User-Agent": "RecallAI-TradingAgent/2.0"
         }
 
+        # 🔍 LOG REQUEST DETAILS
+        self.logger.info("🚀 Making trade request",
+                         url=url,
+                         trade_data=trade_data,
+                         operation_id=operation_id)
+
         try:
             response = requests.post(
                 url,
                 json=trade_data,  # Прямая отправка JSON
                 headers=headers,
-                timeout=self.config.api.timeout
+                timeout=30  # 30 секунд timeout
             )
+
+            # 🔍 LOG RESPONSE DETAILS
+            self.logger.info("📝 API Response received",
+                             status_code=response.status_code,
+                             content_length=len(response.content) if response.content else 0,
+                             operation_id=operation_id)
 
             if response.status_code == 200:
                 try:
                     response_data = response.json() if response.content else {}
+
+                    # 🔍 LOG SUCCESS RESPONSE DATA
+                    self.logger.info("✅ Trade API Success Response",
+                                     response_data=response_data,
+                                     operation_id=operation_id)
+
                     return ApiResponse(success=True, data=response_data, status_code=200)
-                except:
-                    return ApiResponse(success=False, error="Invalid JSON", status_code=200)
+                except Exception as json_error:
+                    # 🔍 LOG JSON PARSING ERROR
+                    self.logger.error("❌ JSON Parsing Error",
+                                      error=str(json_error),
+                                      raw_content=response.text[:500],  # First 500 chars
+                                      operation_id=operation_id)
+                    return ApiResponse(success=False, error="Invalid JSON response", status_code=200)
             else:
+                # 🔍 LOG HTTP ERROR DETAILS
                 error_text = response.text if response.content else f"HTTP {response.status_code}"
+
+                self.logger.error("❌ Trade API HTTP Error",
+                                  status_code=response.status_code,
+                                  error_text=error_text[:1000],  # First 1000 chars
+                                  headers=dict(response.headers),
+                                  operation_id=operation_id)
+
                 return ApiResponse(success=False, error=error_text, status_code=response.status_code)
 
+        except requests.exceptions.Timeout as e:
+            # 🔍 LOG TIMEOUT ERROR
+            self.logger.error("❌ Trade API Timeout",
+                              error=str(e),
+                              timeout=30,
+                              operation_id=operation_id)
+            return ApiResponse(success=False, error=f"Request timeout after 30s")
+
+        except requests.exceptions.ConnectionError as e:
+            # 🔍 LOG CONNECTION ERROR
+            self.logger.error("❌ Trade API Connection Error",
+                              error=str(e),
+                              url=url,
+                              operation_id=operation_id)
+            return ApiResponse(success=False, error=f"Connection error: {str(e)}")
+
         except Exception as e:
-            return ApiResponse(success=False, error=str(e))
+            # 🔍 LOG UNEXPECTED ERROR
+            self.logger.error("❌ Trade API Unexpected Error",
+                              error=str(e),
+                              error_type=type(e).__name__,
+                              operation_id=operation_id)
+            return ApiResponse(success=False, error=f"Unexpected error: {str(e)}")
 
     def _process_execution_result(self, response: ApiResponse, signal: TradingSignal, start_time: float) -> TradeResult:
         """
@@ -353,6 +432,22 @@ class TradeExecutor:
                 execution_time=0.0
             )
 
+        # 🔥 КРИТИЧЕСКОЕ ИСПРАВЛЕНИЕ: проверка одинаковых токенов
+        if signal.from_token.lower() == signal.to_token.lower():
+            self.logger.warning(
+                "Same token trade detected - skipping",
+                from_token=signal.from_token[:10] + "...",
+                to_token=signal.to_token[:10] + "...",
+                reasoning=signal.reasoning
+            )
+            return TradeResult(
+                signal=signal,
+                status=ExecutionStatus.CANCELLED,
+                error_message="Same token trade not allowed (USDC->USDC)",
+                execution_time=0.0
+            )
+
+        # Execute the trade
         return self.execute_trade(signal.from_token, signal.to_token, signal.amount)
 
     def get_execution_metrics(self) -> ExecutionMetrics:
@@ -421,6 +516,47 @@ class TradeExecutor:
         """Context manager entry"""
         self.start_execution()
         return self
+
+    def calculate_dynamic_trade_size(self, portfolio_value: float, signal_confidence: float, risk_level: str) -> str:
+        """
+        Calculate trade size based on portfolio value and signal strength
+        Согласно Portfolio Manager Tutorial
+        """
+
+        # Base allocation based on portfolio value
+        if portfolio_value > 50000:
+            base_percentage = 0.15  # 15% for large portfolios
+        elif portfolio_value > 20000:
+            base_percentage = 0.20  # 20% for medium portfolios
+        else:
+            base_percentage = 0.25  # 25% for smaller portfolios
+
+        # Adjust based on signal confidence
+        confidence_multiplier = 0.5 + (signal_confidence * 1.0)  # 0.5x to 1.5x
+
+        # Adjust based on risk level
+        risk_multipliers = {
+            "LOW": 0.7,
+            "MEDIUM": 1.0,
+            "HIGH": 1.3
+        }
+        risk_multiplier = risk_multipliers.get(risk_level, 1.0)
+
+        # Calculate final trade size
+        trade_percentage = base_percentage * confidence_multiplier * risk_multiplier
+        trade_percentage = min(trade_percentage, 0.40)  # Cap at max 40%
+
+        trade_amount = portfolio_value * trade_percentage
+        trade_amount = max(trade_amount, 200)  # Ensure minimum $200
+
+        self.logger.info("Dynamic trade size calculated",
+                         portfolio_value=portfolio_value,
+                         base_pct=base_percentage,
+                         confidence=signal_confidence,
+                         risk_level=risk_level,
+                         final_amount=trade_amount)
+
+        return str(int(trade_amount))
 
     def __exit__(self, exc_type, exc_val, exc_tb):
         """Context manager exit"""
